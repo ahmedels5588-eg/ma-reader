@@ -1,0 +1,13 @@
+{
+  "latest_version": "2.2.0",
+  "download_url": "https://ma-reader.netlify.app/downloads/MAReaderSetup_2.2.0.exe",
+  "sha256": "6B124283AB4311FFB388BF801381BE972CD8F56F40D7C9BD8E9600A70FB3ECF5",
+  "mandatory_update": false,
+  "api_base_url": "https://your-worker.workers.dev",
+  "changelog": [
+    "إصدار 2.2.0 من MA Reader",
+    "تحسينات في تحويل ملفات PDF والصور إلى Word",
+    "تحسينات في دعم اللغة العربية والتنسيق",
+    "تحسينات في سهولة الوصول والاستقرار"
+  ]
+}

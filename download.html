@@ -1,0 +1,155 @@
+<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Download - MA Reader</title><meta name="description" content="MA Reader - PDF & Image to Word official website."><link rel="stylesheet" href="assets/styles.css"></head><body><a class="skip-link" href="#main">Skip to main content</a><header class="site-header"><div class="container navbar"><a href="index.html" class="brand" aria-label="MA Reader home"><div class="logo" aria-hidden="true"><span>MA</span></div><div><div>MA Reader</div><small data-i18n="brandSub"></small></div></a><nav id="navLinks" class="nav-links" aria-label="Main navigation"><a class="" href="index.html" data-i18n="nav.home"></a>
+<a class="" href="features.html" data-i18n="nav.features"></a>
+<a class="" href="shortcuts.html" data-i18n="nav.shortcuts"></a>
+<a class="active" href="download.html" data-i18n="nav.download"></a>
+<a class="" href="about.html" data-i18n="nav.about"></a></nav><div class="header-actions"><button class="btn btn-ghost mobile-toggle" id="mobileMenu" type="button" data-i18n="menu"></button><button class="btn btn-ghost" id="langToggle" type="button" data-i18n="langToggle"></button><a class="btn btn-primary" href="download.html" data-i18n="nav.download"></a></div></div></header><main id="main"><section class="page-hero"><div class="container page-title"><div class="kicker" data-i18n="downloadPage.kicker"></div><h1 data-i18n="downloadPage.title"></h1><p class="lead" data-i18n="downloadPage.subtitle"></p></div></section><section class="section"><div class="container"><div class="download-box"><div><h2>MA Reader - PDF & Image to Word</h2><p class="note" data-i18n="common.versionLine"></p><p class="note" data-i18n="downloadPage.placeholder"></p><p><strong data-i18n="downloadPage.safety"></strong></p></div><a class="btn btn-primary" data-download-link href="#" data-i18n="downloadPage.button"></a></div></div></section><section class="section"><div class="container grid grid-2"><article class="card"><div class="icon" aria-hidden="true">🧾</div><h3 data-i18n="downloadPage.releaseNotesTitle"></h3><ul data-render="releaseNotes"></ul></article><article class="card"><div class="icon" aria-hidden="true">💻</div><h3 data-i18n="downloadPage.sysReqTitle"></h3><ul data-render="sysReq"></ul></article></div></section></main><footer class="footer"><div class="container footer-grid"><div><div class="brand"><div class="logo" aria-hidden="true"><span>MA</span></div><div><strong>MA Reader</strong><small>PDF & Image to Word</small></div></div><p data-i18n="footer.description"></p><p data-i18n="footer.copyright"></p></div><div><p data-i18n="footer.version"></p><p data-i18n="footer.idea"></p><p data-i18n="footer.development"></p><p data-i18n="footer.windows"></p></div></div></footer><script src="assets/app.js"></script>
+<script>
+/*
+  MA Reader download page override.
+  This script keeps the visible download page synced with latest.json.
+  Note: Browsers often block reading local latest.json when opening this file with file://.
+  For local testing, run a small local server or preview from Netlify.
+*/
+(function () {
+  const OFFICIAL_SITE = "https://ma-reader.netlify.app";
+  const FALLBACK_LATEST = {
+    latest_version: "2.2",
+    download_url: "https://ma-reader.netlify.app/downloads/MAReaderSetup-2.2.exe",
+    changelog: [
+      "إصدار 2.2 من MA Reader",
+      "تحسينات في تحويل ملفات PDF والصور إلى Word",
+      "تحسينات في دعم اللغة العربية والتنسيق",
+      "تحسينات في سهولة الوصول واختصارات لوحة المفاتيح"
+    ]
+  };
+
+  function currentLang() {
+    return localStorage.getItem("ma-reader-lang") === "ar" || document.documentElement.dir === "rtl"
+      ? "ar"
+      : "en";
+  }
+
+  function isPlaceholderUrl(url) {
+    return !url || url.includes("your-site.netlify.app") || url.includes("PUT_") || url === "#";
+  }
+
+  async function tryFetchJson(url) {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error("Unable to load " + url);
+    return await response.json();
+  }
+
+  async function loadLatest() {
+    const candidates = ["latest.json"];
+
+    // When opening download.html manually from the computer, local fetch is often blocked.
+    // This fallback keeps the page useful by reading the public Netlify latest.json if available.
+    if (window.location.protocol === "file:") {
+      candidates.push(OFFICIAL_SITE + "/latest.json");
+    }
+
+    for (const url of candidates) {
+      try {
+        return await tryFetchJson(url);
+      } catch (error) {
+        // Try next candidate.
+      }
+    }
+
+    return FALLBACK_LATEST;
+  }
+
+  function setText(selector, value) {
+    const element = document.querySelector(selector);
+    if (element) element.textContent = value;
+  }
+
+  function applyDownloadContent(latest) {
+    const lang = currentLang();
+    const ar = lang === "ar";
+    const version = latest.latest_version || FALLBACK_LATEST.latest_version;
+
+    let downloadUrl = latest.download_url || FALLBACK_LATEST.download_url;
+    if (isPlaceholderUrl(downloadUrl)) {
+      downloadUrl = `${OFFICIAL_SITE}/downloads/MAReaderSetup-${version}.exe`;
+    }
+
+    setText(
+      '[data-i18n="downloadPage.subtitle"]',
+      ar
+        ? "حمّل أحدث إصدار من MA Reader لتحويل ملفات PDF المصورة والصور إلى Word منسق أو نص فقط باستخدام الذكاء الاصطناعي."
+        : "Download the latest version of MA Reader to convert scanned PDFs and images into formatted Word documents or plain text using AI."
+    );
+
+    setText(
+      '[data-i18n="common.versionLine"]',
+      ar
+        ? `الإصدار ${version} • تطبيق ويندوز لسطح المكتب`
+        : `Version ${version} • Windows Desktop App`
+    );
+
+    setText(
+      '[data-i18n="downloadPage.placeholder"]',
+      ar
+        ? "هذا هو رابط التحميل الرسمي لآخر إصدار متاح."
+        : "This is the official download link for the latest available release."
+    );
+
+    setText(
+      '[data-i18n="downloadPage.safety"]',
+      ar
+        ? "حمّل البرنامج فقط من الموقع الرسمي لـ MA Reader."
+        : "Download only from the official MA Reader website."
+    );
+
+    setText(
+      '[data-i18n="footer.version"]',
+      ar ? `الإصدار ${version}` : `Version ${version}`
+    );
+
+    const button = document.querySelector("[data-download-link]");
+    if (button) {
+      button.setAttribute("href", downloadUrl);
+      button.setAttribute("download", "");
+      button.textContent = ar ? "تحميل آخر إصدار" : "Download Latest Version";
+    }
+
+    const releaseNotes = document.querySelector('[data-render="releaseNotes"]');
+    if (releaseNotes) {
+      const notes =
+        Array.isArray(latest.changelog) && latest.changelog.length
+          ? latest.changelog
+          : FALLBACK_LATEST.changelog;
+
+      releaseNotes.innerHTML = notes.map((item) => `<li>${item}</li>`).join("");
+    }
+  }
+
+  function ready(callback) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", callback);
+    } else {
+      callback();
+    }
+  }
+
+  ready(async function () {
+    const latest = await loadLatest();
+
+    // app.js also writes translations on load, so apply after it has finished.
+    setTimeout(function () {
+      applyDownloadContent(latest);
+    }, 0);
+
+    const langToggle = document.getElementById("langToggle");
+    if (langToggle) {
+      langToggle.addEventListener("click", function () {
+        setTimeout(function () {
+          applyDownloadContent(latest);
+        }, 50);
+      });
+    }
+  });
+})();
+</script>
+</body></html>
