@@ -15,6 +15,21 @@ export async function convertPageWithGemini(
   return parseGeminiJson(text, page.pageNumber);
 }
 
+export async function convertPagesWithGemini(
+  apiKey: string,
+  pages: SourcePage[],
+  options: ConvertOptions,
+  signal?: AbortSignal
+): Promise<GeminiPageResult[]> {
+  if (pages.length === 1) {
+    return [await convertPageWithGemini(apiKey, pages[0], options, signal)];
+  }
+
+  const prompt = buildBatchPrompt(pages.map((page) => page.pageNumber), options);
+  const text = await requestGeminiImages(apiKey, pages.map((page) => page.imageDataUrl), prompt, "application/json", signal);
+  return parseGeminiBatchJson(text, pages.map((page) => page.pageNumber));
+}
+
 export async function rescuePageTextWithGemini(
   apiKey: string,
   page: SourcePage,
@@ -80,6 +95,32 @@ async function requestGemini(
   return payload.text;
 }
 
+async function requestGeminiImages(
+  apiKey: string,
+  imageDataUrls: string[],
+  prompt: string,
+  responseMimeType: "application/json" | "text/plain",
+  signal?: AbortSignal
+): Promise<string> {
+  const response = await fetch("/.netlify/functions/gemini", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey, imageDataUrls, prompt, responseMimeType }),
+    signal
+  });
+
+  const payload = (await response.json().catch(() => null)) as { text?: string; error?: string } | null;
+  if (!response.ok) {
+    throw new Error(payload?.error || "فشل الاتصال بخدمة Gemini.");
+  }
+
+  if (!payload?.text) {
+    throw new Error("لم يرجع Gemini نصًا صالحًا.");
+  }
+
+  return payload.text;
+}
+
 export function buildPrompt(pageNumber: number, options: ConvertOptions): string {
   const detail = modeInstruction(options.conversionMode);
   const textModeInstruction = options.outputMode === "text"
@@ -111,8 +152,48 @@ ${imageInstruction}
   "tables": [{ "rows": [["خلية", "خلية"]] }],
   "image_descriptions": ["وصف اختياري"]
 }
-
 إذا لم توجد جداول اجعل tables مصفوفة فارغة. إذا لم توجد أوصاف صور اجعل image_descriptions مصفوفة فارغة.`;
+}
+
+function buildBatchPrompt(pageNumbers: number[], options: ConvertOptions): string {
+  const detail = modeInstruction(options.conversionMode);
+  const textModeInstruction = options.outputMode === "text"
+    ? "وضع TXT: لا تستخرج أو تضف أي تنسيق بصري مثل bold أو italic أو underline أو font_size أو bbox."
+    : "وضع Word: يمكن استخدام runs للحفاظ على الغامق والمائل والتسطير وحجم الخط عندما تكون ظاهرة بوضوح في الأصل. اجعل التسطير على نفس الكلمة أو العبارة فقط. استخدم role للعناوين والقوائم والمحاذاة الواضحة فقط.";
+  const imageInstruction = options.includeImageDescriptions
+    ? "إذا وجدت صورة أو رسمًا مهمًا، أضف وصفًا موجزًا له في image_descriptions."
+    : "لا تضف أوصاف صور ولا تكتب عبارات بديلة مثل صورة مدمجة أو صورة من الصفحة.";
+
+  return `أنت محرك OCR عربي دقيق. الصور المرفقة تمثل الصفحات التالية بنفس ترتيب الإرفاق: ${pageNumbers.join(", ")}.
+
+${detail}
+${textModeInstruction}
+${imageInstruction}
+
+قواعد مهمة:
+- استخرج كل صفحة مستقلة، ولا تخلط نص صفحة بصفحة أخرى.
+- حافظ على النص العربي والتشكيل الظاهر حرفيًا، ولا تضف تشكيلًا غير ظاهر.
+- لا تضف محتوى غير موجود في الصور.
+- لا تكتب مقدمات أو شروحًا خارج JSON.
+- إذا وجدت سلسلة نقاط أو شرطات أو خطوط طويلة للحشو، اختصرها إلى ثلاث نقاط فقط: ...
+- لا تستخدم markdown code fences.
+
+أعد JSON فقط بهذا الشكل:
+{
+  "pages": [
+    {
+      "page_number": ${pageNumbers[0]},
+      "text_blocks": [
+        { "text": "نص فقرة أو عنوان", "role": "paragraph", "level": 0, "alignment": "right", "font_size": 14, "runs": [{ "text": "جزء من النص", "bold": false, "italic": false, "underline": false, "font_size": 14 }] }
+      ],
+      "tables": [{ "rows": [["خلية", "خلية"]] }],
+      "image_descriptions": ["وصف اختياري"]
+    }
+  ]
+}
+
+يجب أن تحتوي pages على نتيجة لكل صفحة من هذه الصفحات: ${pageNumbers.join(", ")}.
+إذا لم توجد جداول في صفحة اجعل tables مصفوفة فارغة. إذا لم توجد أوصاف صور اجعل image_descriptions مصفوفة فارغة.`;
 }
 
 function modeInstruction(mode: ConversionMode): string {
@@ -145,6 +226,32 @@ function parseGeminiJson(rawText: string, pageNumber: number): GeminiPageResult 
   }
 
   return normalizeGeminiResult(parsed, pageNumber);
+}
+
+function parseGeminiBatchJson(rawText: string, pageNumbers: number[]): GeminiPageResult[] {
+  const text = sanitizeJsonText(stripCodeFence(rawText));
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+
+  if (start < 0 || end <= start) {
+    throw new Error("لم يرجع Gemini JSON واضحًا لدفعة الصفحات.");
+  }
+
+  const parsed = parseJsonWithRepair(text.slice(start, end + 1)) as { pages?: GeminiPageResult[] } | GeminiPageResult[];
+  const rawPages = Array.isArray(parsed) ? parsed : parsed.pages;
+  if (!Array.isArray(rawPages)) {
+    throw new Error("رد Gemini لا يحتوي على مصفوفة pages.");
+  }
+
+  const normalized = rawPages.map((page) => normalizeGeminiResult(page, Number(page.page_number)));
+  const byNumber = new Map(normalized.map((page) => [page.page_number, page]));
+  return pageNumbers.map((pageNumber) => {
+    const page = byNumber.get(pageNumber);
+    if (!page) {
+      throw new Error(`لم يرجع Gemini نتيجة الصفحة ${pageNumber} داخل الدفعة.`);
+    }
+    return page;
+  });
 }
 
 function parseJsonWithRepair(jsonText: string): unknown {

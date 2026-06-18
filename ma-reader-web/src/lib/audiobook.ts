@@ -35,6 +35,10 @@ export async function testGoogleCloudTts(apiKey: string, signal?: AbortSignal): 
   await synthesizeSpeech(apiKey, "اختبار", "google", signal);
 }
 
+export async function testGeminiTts(apiKey: string, signal?: AbortSignal): Promise<void> {
+  await synthesizeSpeech(apiKey, "اختبار", "gemini", signal);
+}
+
 export function splitTextForTts(text: string, maxLength = 1800): string[] {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (!normalized) {

@@ -60,5 +60,6 @@ export interface ConvertOptions {
 export interface AppSettings extends ConvertOptions {
   pageFrom: number;
   pageTo: number;
+  pagesPerRequest: number;
   privacyAccepted: boolean;
 }

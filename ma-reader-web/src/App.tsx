@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { summarizeProgress } from "./lib/accessibility";
-import { splitTextForTts, synthesizeSpeech, testGoogleCloudTts, ttsSegmentsToWavBlob, type TtsAudioSegment, type TtsProvider } from "./lib/audiobook";
+import { splitTextForTts, synthesizeSpeech, testGeminiTts, testGoogleCloudTts, ttsSegmentsToWavBlob, type TtsAudioSegment, type TtsProvider } from "./lib/audiobook";
 import { buildDocx, buildErrorReport, buildPlainText, downloadBlob } from "./lib/docxBuilder";
-import { askGemini, convertPageWithGemini, rescuePageTextWithGemini, resultFromPlainText } from "./lib/gemini";
+import { askGemini, convertPageWithGemini, convertPagesWithGemini, rescuePageTextWithGemini, resultFromPlainText } from "./lib/gemini";
 import { filesToSourcePages } from "./lib/pdf";
 import { deleteApiKey, loadApiKeys, loadSettings, normalizeApiKeys, saveApiKeys, saveSettings } from "./lib/storage";
 import type { AppSettings, ConversionMode, ConvertOptions, OutputMode, PageResult, SourcePage } from "./lib/types";
@@ -24,6 +24,7 @@ export default function App() {
   const [includeEmbeddedImages, setIncludeEmbeddedImages] = useState(false);
   const [pageFrom, setPageFrom] = useState(1);
   const [pageTo, setPageTo] = useState(1);
+  const [pagesPerRequest, setPagesPerRequest] = useState(1);
   const [privacyAccepted, setPrivacyAccepted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("جاهز.");
@@ -42,7 +43,7 @@ export default function App() {
   const [audiobookMessage, setAudiobookMessage] = useState("لم يتم إنشاء كتاب صوتي بعد.");
   const [audiobookBlob, setAudiobookBlob] = useState<Blob | null>(null);
   const [audiobookProgress, setAudiobookProgress] = useState(0);
-  const [ttsProvider, setTtsProvider] = useState<TtsProvider>("google");
+  const [ttsProvider, setTtsProvider] = useState<TtsProvider>("gemini");
   const stopRequested = useRef(false);
   const abortController = useRef<AbortController | null>(null);
   const audiobookAbortController = useRef<AbortController | null>(null);
@@ -62,6 +63,7 @@ export default function App() {
     setIncludeEmbeddedImages(Boolean(settings.includeEmbeddedImages));
     setPageFrom(Math.max(1, Number(settings.pageFrom ?? 1)));
     setPageTo(Math.max(1, Number(settings.pageTo ?? 1)));
+    setPagesPerRequest(clampPagesPerRequest(Number(settings.pagesPerRequest ?? 1)));
     setPrivacyAccepted(Boolean(settings.privacyAccepted));
   }, []);
 
@@ -73,10 +75,11 @@ export default function App() {
       includeEmbeddedImages,
       pageFrom,
       pageTo,
+      pagesPerRequest,
       privacyAccepted
     };
     saveSettings(settings);
-  }, [outputMode, conversionMode, includeImageDescriptions, includeEmbeddedImages, pageFrom, pageTo, privacyAccepted]);
+  }, [outputMode, conversionMode, includeImageDescriptions, includeEmbeddedImages, pageFrom, pageTo, pagesPerRequest, privacyAccepted]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -212,9 +215,9 @@ export default function App() {
         }
       }
 
-      setApiKeyTestStatus("نجح اختبار Gemini. جاري اختبار Google Cloud TTS...");
-      await testGoogleCloudTts(key);
-      const message = "تم اختبار المفتاح بنجاح مع Gemini وGoogle Cloud TTS وتم قبوله.";
+      setApiKeyTestStatus("نجح اختبار Gemini. جاري اختبار Gemini TTS...");
+      await testGeminiTts(key);
+      const message = "تم اختبار المفتاح بنجاح مع Gemini وGemini TTS وتم قبوله.";
       setApiKeyTestStatus(message);
       return { accepted: true, message };
     } finally {
@@ -258,6 +261,28 @@ export default function App() {
     setActiveKeyIndex(0);
     setApiKeyTestStatus("");
     setMessage("تم حذف كل مفاتيح API من هذا المتصفح.");
+  }
+
+  async function handleTestGoogleCloudTts() {
+    const key = apiKeyInput.trim() || apiKeys[safeActiveKeyIndex];
+    if (!key) {
+      setAssertiveMessage("أدخل مفتاحًا أو احفظ مفتاحًا أولًا لاختبار Google Cloud TTS.");
+      return;
+    }
+
+    setTestingKey(true);
+    setApiKeyTestStatus("جاري اختبار Google Cloud TTS...");
+    try {
+      await testGoogleCloudTts(key);
+      setApiKeyTestStatus("نجح اختبار Google Cloud TTS لهذا المفتاح.");
+      setMessage("Google Cloud TTS متاح لهذا المفتاح.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "فشل اختبار Google Cloud TTS.";
+      setApiKeyTestStatus(`فشل اختبار Google Cloud TTS: ${message}`);
+      setAssertiveMessage("فشل اختبار Google Cloud TTS. هذا لا يعني أن مفتاح Gemini غير صالح.");
+    } finally {
+      setTestingKey(false);
+    }
   }
 
   async function handleFilesSelected(fileList: FileList | null) {
@@ -431,34 +456,55 @@ export default function App() {
     let workingResults = initialResults;
 
     try {
-      for (const index of targetIndexes) {
+      const batches = chunkIndexes(targetIndexes, clampPagesPerRequest(pagesPerRequest));
+      for (const batchIndexes of batches) {
         if (stopRequested.current) {
-          workingResults = updateResult(workingResults, index, { status: "skipped", error: "تم الإيقاف قبل معالجة الصفحة." });
+          for (const index of batchIndexes) {
+            workingResults = updateResult(workingResults, index, { status: "skipped", error: "تم الإيقاف قبل معالجة الصفحة." });
+          }
           setResults(workingResults);
           continue;
         }
 
         abortController.current = new AbortController();
-        workingResults = updateResult(workingResults, index, { status: "processing", error: undefined });
+        for (const index of batchIndexes) {
+          workingResults = updateResult(workingResults, index, { status: "processing", error: undefined });
+        }
         setResults(workingResults);
-        setMessage(`جاري تحويل الصفحة ${pages[index].pageNumber} من ${pages.length} باستخدام مفتاح ${activeKeyIndex + 1} من ${apiKeys.length}...`);
+
+        const batchPages = batchIndexes.map((index) => pages[index]);
+        const label = batchPages.length === 1
+          ? `الصفحة ${batchPages[0].pageNumber}`
+          : `الصفحات ${batchPages[0].pageNumber} إلى ${batchPages[batchPages.length - 1].pageNumber}`;
+        setMessage(`جاري تحويل ${label} من ${pages.length} باستخدام مفتاح ${activeKeyIndex + 1} من ${apiKeys.length}...`);
 
         try {
-          const data = await convertWithResilience(pages[index], options, abortController.current.signal);
-          workingResults = updateResult(workingResults, index, { status: "done", data, error: undefined });
-        } catch (error) {
-          const fallback = fallbackFromLocalText(pages[index], error);
-          if (fallback) {
-            workingResults = updateResult(workingResults, index, { status: "done", data: fallback, error: undefined });
-          } else {
-            const errorMessage = error instanceof Error ? error.message : "فشل غير معروف.";
-            workingResults = updateResult(workingResults, index, { status: "failed", error: errorMessage });
+          const batchData = batchPages.length === 1
+            ? [await convertWithResilience(batchPages[0], options, abortController.current.signal)]
+            : await convertBatchWithResilience(batchPages, options, abortController.current.signal);
+          for (let itemIndex = 0; itemIndex < batchIndexes.length; itemIndex += 1) {
+            workingResults = updateResult(workingResults, batchIndexes[itemIndex], { status: "done", data: batchData[itemIndex], error: undefined });
+          }
+        } catch {
+          for (const index of batchIndexes) {
+            try {
+              const data = await convertWithResilience(pages[index], options, abortController.current.signal);
+              workingResults = updateResult(workingResults, index, { status: "done", data, error: undefined });
+            } catch (error) {
+              const fallback = fallbackFromLocalText(pages[index], error);
+              if (fallback) {
+                workingResults = updateResult(workingResults, index, { status: "done", data: fallback, error: undefined });
+              } else {
+                const errorMessage = error instanceof Error ? error.message : "فشل غير معروف.";
+                workingResults = updateResult(workingResults, index, { status: "failed", error: errorMessage });
+              }
+            }
           }
         }
 
         setResults(workingResults);
 
-        if (!stopRequested.current && index !== targetIndexes[targetIndexes.length - 1]) {
+        if (!stopRequested.current && batchIndexes !== batches[batches.length - 1]) {
           await delay(REQUEST_DELAY_MS);
         }
       }
@@ -505,6 +551,36 @@ export default function App() {
     }
 
     throw lastError instanceof Error ? lastError : new Error("فشلت كل محاولات Gemini.");
+  }
+
+  async function convertBatchWithResilience(batchPages: SourcePage[], options: ConvertOptions, signal?: AbortSignal) {
+    let lastError: unknown;
+    const orderedKeys = rotateKeys(apiKeys, activeKeyIndex);
+
+    for (const key of orderedKeys) {
+      const realIndex = apiKeys.indexOf(key);
+      setActiveKeyIndex(realIndex >= 0 ? realIndex : 0);
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_KEY; attempt += 1) {
+        if (stopRequested.current) {
+          throw new Error("تم إيقاف التحويل.");
+        }
+
+        try {
+          return await convertPagesWithGemini(key, batchPages, options, signal);
+        } catch (error) {
+          lastError = error;
+          if (isQuotaOrKeyError(error)) {
+            break;
+          }
+          if (attempt < MAX_ATTEMPTS_PER_KEY) {
+            await delay(1500 * attempt);
+          }
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("فشلت دفعة الصفحات بكل المفاتيح.");
   }
 
   function stopConversion() {
@@ -808,8 +884,9 @@ export default function App() {
             </select>
           </label>
         )}
+        <button type="button" className="secondary" onClick={() => void handleTestGoogleCloudTts()} disabled={testingKey || busy}>اختبار Google Cloud TTS اختياريًا</button>
         <p className="hint">{apiKeys.length > 0 ? `يوجد ${apiKeys.length} مفتاح/مفاتيح محفوظة. الحالي: رقم ${safeActiveKeyIndex + 1}.` : "لا توجد مفاتيح محفوظة."} المفاتيح المحفوظة لا تُعرض كنص، وعند quota أو rate limit يتم الانتقال للمفتاح التالي تلقائيًا.</p>
-        <p className="hint" aria-live="polite">{apiKeyTestStatus || "أي مفتاح جديد أو بديل سيتم اختباره مع Gemini قبل قبوله."}</p>
+        <p className="hint" aria-live="polite">{apiKeyTestStatus || "أي مفتاح جديد أو بديل سيتم اختباره مع Gemini وGemini TTS قبل قبوله. Google Cloud TTS اختياري ومتقدم."}</p>
       </section>
 
       <section className="card" aria-labelledby="files-title">
@@ -860,6 +937,17 @@ export default function App() {
             <input type="number" min={1} max={Math.max(1, pages.length)} value={pageTo} disabled={busy || pages.length === 0} onChange={(event) => setPageTo(Number(event.target.value))} />
           </label>
           <label>
+            عدد الصفحات في الطلب الواحد
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={pagesPerRequest}
+              disabled={busy}
+              onChange={(event) => setPagesPerRequest(clampPagesPerRequest(Number(event.target.value)))}
+            />
+          </label>
+          <label>
             نوع الإخراج
             <select value={outputMode} onChange={(event) => setOutputMode(event.target.value as OutputMode)} disabled={busy}>
               <option value="word">Word DOCX</option>
@@ -903,7 +991,7 @@ export default function App() {
           />
           أوافق على إرسال صورة الصفحة الحالية إلى Gemini عند التحويل
         </label>
-        <p className="hint">عدد الصفحات الجاهزة: {pages.length}. النطاق الحالي: {selectedRangeStart} إلى {selectedRangeEnd}. يتم إرسال طلب Gemini واحد فقط في كل مرة.</p>
+        <p className="hint">عدد الصفحات الجاهزة: {pages.length}. النطاق الحالي: {selectedRangeStart} إلى {selectedRangeEnd}. عدد الصفحات في الطلب الواحد: {clampPagesPerRequest(pagesPerRequest)}. لا يتم تشغيل أكثر من طلب Gemini واحد في نفس الوقت.</p>
       </section>
 
       <section className="card" aria-labelledby="actions-title">
@@ -919,12 +1007,12 @@ export default function App() {
 
       <section className="card" aria-labelledby="audiobook-title">
         <h2 id="audiobook-title">4. الكتاب الصوتي</h2>
-        <p className="hint">ينشئ ملف WAV واحدًا من الصفحات المحولة. Google Cloud TTS هو الاختيار الموصى به، وGemini TTS متاح كبديل تجريبي. لا يتم تخزين الصوت على الخادم.</p>
+        <p className="hint">ينشئ ملف WAV واحدًا من الصفحات المحولة. Gemini TTS هو الاختيار الافتراضي الأسهل، وGoogle Cloud TTS خيار متقدم يحتاج تفعيل Text-to-Speech API. لا يتم تخزين الصوت على الخادم.</p>
         <label>
           مزود الصوت
           <select value={ttsProvider} onChange={(event) => setTtsProvider(event.target.value as TtsProvider)} disabled={audiobookBusy}>
-            <option value="google">Google Cloud TTS - موصى به</option>
-            <option value="gemini">Gemini TTS - تجريبي</option>
+            <option value="gemini">Gemini TTS - افتراضي</option>
+            <option value="google">Google Cloud TTS - متقدم</option>
           </select>
         </label>
         <div className="button-row">
@@ -1144,6 +1232,19 @@ function clampPage(value: number, total: number): number {
   }
 
   return Math.min(Math.max(1, Number.isFinite(value) ? value : 1), total);
+}
+
+function clampPagesPerRequest(value: number): number {
+  return Math.min(Math.max(1, Number.isFinite(value) ? Math.round(value) : 1), 10);
+}
+
+function chunkIndexes(indexes: number[], chunkSize: number): number[][] {
+  const chunks: number[][] = [];
+  const size = clampPagesPerRequest(chunkSize);
+  for (let index = 0; index < indexes.length; index += size) {
+    chunks.push(indexes.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function rotateKeys(keys: string[], startIndex: number): string[] {
