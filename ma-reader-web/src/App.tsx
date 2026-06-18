@@ -3,15 +3,17 @@ import { summarizeProgress } from "./lib/accessibility";
 import { buildDocx, buildErrorReport, buildPlainText, downloadBlob } from "./lib/docxBuilder";
 import { askGemini, convertPageWithGemini, rescuePageTextWithGemini, resultFromPlainText } from "./lib/gemini";
 import { filesToSourcePages } from "./lib/pdf";
-import { deleteApiKey, loadApiKey, loadSettings, normalizeApiKeys, saveApiKey, saveSettings } from "./lib/storage";
+import { deleteApiKey, loadApiKeys, loadSettings, normalizeApiKeys, saveApiKeys, saveSettings } from "./lib/storage";
 import type { AppSettings, ConversionMode, ConvertOptions, OutputMode, PageResult, SourcePage } from "./lib/types";
 
 const REQUEST_DELAY_MS = 1200;
 const MAX_ATTEMPTS_PER_KEY = 2;
 
 export default function App() {
-  const [apiKeysText, setApiKeysText] = useState("");
-  const [apiKeySaved, setApiKeySaved] = useState(false);
+  const [apiKeys, setApiKeys] = useState<string[]>([]);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiKeyTestStatus, setApiKeyTestStatus] = useState("");
+  const [testingKey, setTestingKey] = useState(false);
   const [activeKeyIndex, setActiveKeyIndex] = useState(0);
   const [pages, setPages] = useState<SourcePage[]>([]);
   const [results, setResults] = useState<PageResult[]>([]);
@@ -34,16 +36,15 @@ export default function App() {
   const [askBusy, setAskBusy] = useState(false);
   const stopRequested = useRef(false);
   const abortController = useRef<AbortController | null>(null);
-  const apiKeysRef = useRef<HTMLTextAreaElement | null>(null);
+  const apiKeysRef = useRef<HTMLInputElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const askRef = useRef<HTMLTextAreaElement | null>(null);
   const previewRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
-    const storedApiKeys = loadApiKey();
+    const storedApiKeys = loadApiKeys();
     const settings = loadSettings();
-    setApiKeysText(storedApiKeys);
-    setApiKeySaved(normalizeApiKeys(storedApiKeys.split(/\r?\n/)).length > 0);
+    setApiKeys(storedApiKeys);
     setOutputMode(settings.outputMode ?? "word");
     setConversionMode(settings.conversionMode ?? "balanced");
     setIncludeImageDescriptions(Boolean(settings.includeImageDescriptions));
@@ -101,7 +102,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   });
 
-  const apiKeys = normalizeApiKeys(apiKeysText.split(/\r?\n/));
   const doneCount = results.filter((result) => result.status === "done").length;
   const failedCount = results.filter((result) => result.status === "failed").length;
   const progressText = summarizeProgress(doneCount, failedCount, results.length || pages.length);
@@ -112,44 +112,104 @@ export default function App() {
   const selectedRangeStart = Math.min(safePageFrom, safePageTo);
   const selectedRangeEnd = Math.max(safePageFrom, safePageTo);
   const previewText = buildPreviewText(results);
+  const safeActiveKeyIndex = apiKeys.length > 0 ? Math.min(activeKeyIndex, apiKeys.length - 1) : 0;
 
-  function handleSaveApiKey() {
+  async function handleAddApiKey() {
+    const key = apiKeyInput.trim();
+    if (!key) {
+      setAssertiveMessage("أدخل مفتاح Gemini API أولًا.");
+      return;
+    }
+
+    if (apiKeys.includes(key)) {
+      setAssertiveMessage("هذا المفتاح محفوظ بالفعل.");
+      return;
+    }
+
+    try {
+      await testApiKey(key);
+      persistApiKeys([...apiKeys, key], apiKeys.length);
+      setMessage(`تم اختبار المفتاح وقبوله. عدد المفاتيح المحفوظة الآن: ${apiKeys.length + 1}.`);
+    } catch (error) {
+      rejectApiKey(error);
+    }
+  }
+
+  async function handleReplaceCurrentApiKey() {
+    const key = apiKeyInput.trim();
+    if (!key) {
+      setAssertiveMessage("أدخل مفتاح Gemini API الجديد أولًا.");
+      return;
+    }
+
     if (apiKeys.length === 0) {
-      setAssertiveMessage("أدخل مفتاح Gemini API واحدًا على الأقل.");
+      await handleAddApiKey();
       return;
     }
 
-    saveApiKey(apiKeys.join("\n"));
-    setApiKeysText(apiKeys.join("\n"));
-    setApiKeySaved(true);
-    setMessage(`تم حفظ ${apiKeys.length} مفتاح/مفاتيح محليًا في هذا المتصفح فقط.`);
+    if (apiKeys.some((savedKey, index) => savedKey === key && index !== safeActiveKeyIndex)) {
+      setAssertiveMessage("هذا المفتاح موجود بالفعل ضمن المفاتيح المحفوظة.");
+      return;
+    }
+
+    try {
+      await testApiKey(key);
+      const nextKeys = [...apiKeys];
+      nextKeys[safeActiveKeyIndex] = key;
+      persistApiKeys(nextKeys, safeActiveKeyIndex);
+      setMessage(`تم اختبار المفتاح وقبوله واستبدال المفتاح رقم ${safeActiveKeyIndex + 1}.`);
+    } catch (error) {
+      rejectApiKey(error);
+    }
   }
 
-  function handleDeleteApiKey() {
+  async function testApiKey(key: string) {
+    setTestingKey(true);
+    setApiKeyTestStatus("جاري اختبار المفتاح مع Gemini...");
+    try {
+      await askGemini(key, "اختبار مفتاح API. أجب بكلمة OK فقط.");
+      setApiKeyTestStatus("تم التأكد من أن مفتاح API صحيح وتم قبوله.");
+    } finally {
+      setTestingKey(false);
+    }
+  }
+
+  function rejectApiKey(error: unknown) {
+    const message = error instanceof Error ? error.message : "فشل اختبار مفتاح API.";
+    setApiKeyTestStatus(`تم رفض المفتاح: ${message}`);
+    setAssertiveMessage("تم رفض مفتاح API لأنه لم يجتز الاختبار.");
+  }
+
+  function persistApiKeys(nextKeys: string[], nextActiveIndex: number) {
+    const normalizedKeys = normalizeApiKeys(nextKeys);
+    saveApiKeys(normalizedKeys);
+    setApiKeys(normalizedKeys);
+    setApiKeyInput("");
+    setActiveKeyIndex(normalizedKeys.length > 0 ? Math.min(nextActiveIndex, normalizedKeys.length - 1) : 0);
+  }
+
+  function handleDeleteCurrentApiKey() {
+    if (apiKeys.length === 0) {
+      setAssertiveMessage("لا توجد مفاتيح محفوظة لحذفها.");
+      return;
+    }
+
+    const nextKeys = apiKeys.filter((_, index) => index !== safeActiveKeyIndex);
+    persistApiKeys(nextKeys, Math.max(0, safeActiveKeyIndex - 1));
+    if (nextKeys.length === 0) {
+      deleteApiKey();
+    }
+
+    setMessage("تم حذف المفتاح الحالي من هذا المتصفح.");
+  }
+
+  function handleDeleteAllApiKeys() {
     deleteApiKey();
-    setApiKeysText("");
-    setApiKeySaved(false);
+    setApiKeys([]);
+    setApiKeyInput("");
     setActiveKeyIndex(0);
-    setMessage("تم حذف مفاتيح API من هذا المتصفح.");
-  }
-
-  async function handleApiKeysFile(fileList: FileList | null) {
-    const file = fileList?.[0];
-    if (!file) {
-      return;
-    }
-
-    const text = await file.text();
-    const keys = normalizeApiKeys(text.split(/\r?\n/));
-    if (keys.length === 0) {
-      setAssertiveMessage("لم يتم العثور على مفاتيح داخل ملف TXT.");
-      return;
-    }
-
-    setApiKeysText(keys.join("\n"));
-    saveApiKey(keys.join("\n"));
-    setApiKeySaved(true);
-    setMessage(`تم استيراد ${keys.length} مفتاح/مفاتيح API.`);
+    setApiKeyTestStatus("");
+    setMessage("تم حذف كل مفاتيح API من هذا المتصفح.");
   }
 
   async function handleFilesSelected(fileList: FileList | null) {
@@ -473,24 +533,36 @@ export default function App() {
 
       <section className="card" aria-labelledby="api-title">
         <h2 id="api-title">1. مفاتيح Gemini API</h2>
-        <label htmlFor="api-key">المفاتيح، مفتاح واحد في كل سطر</label>
-        <textarea
+        <label htmlFor="api-key">اكتب مفتاحًا جديدًا أو بديلًا</label>
+        <input
           id="api-key"
           ref={apiKeysRef}
-          rows={4}
+          type="password"
           autoComplete="off"
-          value={apiKeysText}
-          onChange={(event) => setApiKeysText(event.target.value)}
+          value={apiKeyInput}
+          onChange={(event) => setApiKeyInput(event.target.value)}
           placeholder="AIza..."
+          disabled={testingKey || busy}
         />
         <div className="button-row">
-          <button type="button" onClick={handleSaveApiKey}>حفظ محليًا</button>
-          <button type="button" className="secondary" onClick={handleDeleteApiKey}>حذف المفاتيح</button>
+          <button type="button" onClick={() => void handleAddApiKey()} disabled={testingKey || busy}>اختبار وإضافة مفتاح جديد</button>
+          <button type="button" className="secondary" onClick={() => void handleReplaceCurrentApiKey()} disabled={testingKey || busy}>اختبار واستبدال الحالي</button>
+          <button type="button" className="secondary" onClick={handleDeleteCurrentApiKey} disabled={testingKey || busy || apiKeys.length === 0}>حذف الحالي</button>
+          <button type="button" className="secondary" onClick={handleDeleteAllApiKeys} disabled={testingKey || busy || apiKeys.length === 0}>حذف الكل</button>
           <a className="button-link" href="https://aistudio.google.com/app/api-keys" target="_blank" rel="noreferrer">الحصول على مفتاح</a>
         </div>
-        <label htmlFor="api-keys-file">استيراد مفاتيح من TXT</label>
-        <input id="api-keys-file" type="file" accept="text/plain,.txt" onChange={(event) => void handleApiKeysFile(event.target.files)} />
-        <p className="hint">الحالة: {apiKeySaved ? `يوجد ${apiKeys.length} مفتاح/مفاتيح محفوظة` : "لا توجد مفاتيح محفوظة"}. عند quota أو rate limit يتم الانتقال للمفتاح التالي تلقائيًا.</p>
+        {apiKeys.length > 0 && (
+          <label>
+            المفتاح الحالي المستخدم عند البدء
+            <select value={safeActiveKeyIndex} onChange={(event) => setActiveKeyIndex(Number(event.target.value))} disabled={testingKey || busy}>
+              {apiKeys.map((_, index) => (
+                <option value={index} key={index}>مفتاح رقم {index + 1}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <p className="hint">{apiKeys.length > 0 ? `يوجد ${apiKeys.length} مفتاح/مفاتيح محفوظة. الحالي: رقم ${safeActiveKeyIndex + 1}.` : "لا توجد مفاتيح محفوظة."} المفاتيح المحفوظة لا تُعرض كنص، وعند quota أو rate limit يتم الانتقال للمفتاح التالي تلقائيًا.</p>
+        <p className="hint" aria-live="polite">{apiKeyTestStatus || "أي مفتاح جديد أو بديل سيتم اختباره مع Gemini قبل قبوله."}</p>
       </section>
 
       <section className="card" aria-labelledby="files-title">
