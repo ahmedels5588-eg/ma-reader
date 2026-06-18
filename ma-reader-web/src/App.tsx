@@ -301,6 +301,12 @@ export default function App() {
       return;
     }
 
+    const pageToDelete = pages.find((page) => page.id === pageId);
+    if (!pageToDelete?.id.startsWith("camera-")) {
+      setAssertiveMessage("يمكن حذف الصور الملتقطة بالكاميرا فقط.");
+      return;
+    }
+
     const keptPages = pages.filter((page) => page.id !== pageId).map((page, index) => ({ ...page, pageNumber: index + 1 }));
     const keptIds = new Set(keptPages.map((page) => page.id));
     const renumberedResults = results
@@ -830,28 +836,15 @@ export default function App() {
           <p className="hint">يمكن التقاط صورة من الكاميرا وإضافة PDF أو صور معها في نفس التحويل.</p>
         </div>
 
-        {pages.length > 0 && (
-          <div className="table-wrap" aria-labelledby="selected-pages-title">
-            <h3 id="selected-pages-title">الصفحات المختارة</h3>
-            <table>
-              <caption>يمكن حذف أي صفحة قبل أو بعد التحويل</caption>
-              <thead>
-                <tr>
-                  <th scope="col">الصفحة</th>
-                  <th scope="col">المصدر</th>
-                  <th scope="col">الإجراء</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pages.map((page) => (
-                  <tr key={page.id}>
-                    <td>{page.pageNumber}</td>
-                    <td>{page.sourceName}</td>
-                    <td><button type="button" className="secondary small-button" onClick={() => deleteSourcePage(page.id)} disabled={busy || loadingFiles}>حذف</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {pages.some((page) => page.id.startsWith("camera-")) && (
+          <div className="captured-list" aria-labelledby="captured-pages-title">
+            <h3 id="captured-pages-title">الصور الملتقطة بالكاميرا</h3>
+            {pages.filter((page) => page.id.startsWith("camera-")).map((page) => (
+              <div className="captured-item" key={page.id}>
+                <span>صورة ملتقطة، الصفحة {page.pageNumber}</span>
+                <button type="button" className="secondary small-button" onClick={() => deleteSourcePage(page.id)} disabled={busy || loadingFiles}>حذف الصورة</button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -952,7 +945,7 @@ export default function App() {
           </select>
           <button type="button" className="secondary" onClick={() => movePreviewPage(-1)} disabled={successfulPreviewResults.length === 0}>الصفحة السابقة</button>
           <button type="button" className="secondary" onClick={() => movePreviewPage(1)} disabled={successfulPreviewResults.length === 0}>الصفحة التالية</button>
-          <button type="button" className="secondary" onClick={() => currentPreviewResult && deleteSourcePage(currentPreviewResult.page.id)} disabled={!currentPreviewResult || busy}>حذف صفحة المعاينة</button>
+          <button type="button" className="secondary" onClick={() => currentPreviewResult && deleteSourcePage(currentPreviewResult.page.id)} disabled={!currentPreviewResult?.page.id.startsWith("camera-") || busy}>حذف الصورة الملتقطة</button>
         </div>
         <div className="button-row search-row">
           <label htmlFor="search-box" className="search-label">بحث داخل الصفحة الحالية</label>
@@ -993,7 +986,6 @@ export default function App() {
                   <th scope="col">المصدر</th>
                   <th scope="col">الحالة</th>
                   <th scope="col">تفاصيل</th>
-                  <th scope="col">الإجراء</th>
                 </tr>
               </thead>
               <tbody>
@@ -1003,7 +995,6 @@ export default function App() {
                     <td>{result.page.sourceName}</td>
                     <td>{statusLabel(result.status)}</td>
                     <td>{result.error || result.data?.warnings?.join("؛ ") || "-"}</td>
-                    <td><button type="button" className="secondary small-button" onClick={() => deleteSourcePage(result.page.id)} disabled={busy || loadingFiles}>حذف</button></td>
                   </tr>
                 ))}
               </tbody>
