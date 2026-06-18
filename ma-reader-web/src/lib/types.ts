@@ -11,6 +11,7 @@ export interface SourcePage {
   imageDataUrl: string;
   width: number;
   height: number;
+  localText?: string;
 }
 
 export interface WordRun {
@@ -18,11 +19,16 @@ export interface WordRun {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  font_size?: number;
 }
 
 export interface TextBlock {
   text: string;
   runs?: WordRun[];
+  role?: "heading" | "paragraph" | "list_item";
+  level?: number;
+  alignment?: "right" | "center" | "left";
+  font_size?: number;
 }
 
 export interface TableBlock {
@@ -48,4 +54,11 @@ export interface ConvertOptions {
   outputMode: OutputMode;
   conversionMode: ConversionMode;
   includeImageDescriptions: boolean;
+  includeEmbeddedImages: boolean;
+}
+
+export interface AppSettings extends ConvertOptions {
+  pageFrom: number;
+  pageTo: number;
+  privacyAccepted: boolean;
 }

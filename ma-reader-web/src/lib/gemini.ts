@@ -11,10 +11,60 @@ export async function convertPageWithGemini(
   signal?: AbortSignal
 ): Promise<GeminiPageResult> {
   const prompt = buildPrompt(page.pageNumber, options);
+  const text = await requestGemini(apiKey, page.imageDataUrl, prompt, "application/json", signal);
+  return parseGeminiJson(text, page.pageNumber);
+}
+
+export async function rescuePageTextWithGemini(
+  apiKey: string,
+  page: SourcePage,
+  signal?: AbortSignal
+): Promise<GeminiPageResult> {
+  const prompt = `استخرج النص الظاهر في الصفحة رقم ${page.pageNumber} كنص خام فقط.
+لا تضف شرحًا، ولا Markdown، ولا JSON، ولا تنسيقًا بصريًا.
+حافظ على التشكيل العربي الظاهر ولا تضف تشكيلًا غير موجود.
+اختصر سلاسل النقاط أو الشرطات الطويلة إلى ثلاث نقاط فقط: ...`;
+  const text = await requestGemini(apiKey, page.imageDataUrl, prompt, "text/plain", signal);
+
+  return resultFromPlainText(text, page.pageNumber, "تم استخدام إنقاذ نصي بعد فشل JSON.");
+}
+
+export async function askGemini(
+  apiKey: string,
+  prompt: string,
+  imageDataUrls: string[] = [],
+  signal?: AbortSignal
+): Promise<string> {
   const response = await fetch("/.netlify/functions/gemini", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey, imageDataUrl: page.imageDataUrl, prompt }),
+    body: JSON.stringify({ apiKey, prompt, imageDataUrls, responseMimeType: "text/plain" }),
+    signal
+  });
+
+  const payload = (await response.json().catch(() => null)) as { text?: string; error?: string } | null;
+  if (!response.ok) {
+    throw new Error(payload?.error || "فشل سؤال Gemini.");
+  }
+
+  if (!payload?.text) {
+    throw new Error("لم يرجع Gemini إجابة.");
+  }
+
+  return payload.text;
+}
+
+async function requestGemini(
+  apiKey: string,
+  imageDataUrl: string,
+  prompt: string,
+  responseMimeType: "application/json" | "text/plain",
+  signal?: AbortSignal
+): Promise<string> {
+  const response = await fetch("/.netlify/functions/gemini", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey, imageDataUrl, prompt, responseMimeType }),
     signal
   });
 
@@ -27,14 +77,14 @@ export async function convertPageWithGemini(
     throw new Error("لم يرجع Gemini نصًا صالحًا.");
   }
 
-  return parseGeminiJson(payload.text, page.pageNumber);
+  return payload.text;
 }
 
 export function buildPrompt(pageNumber: number, options: ConvertOptions): string {
   const detail = modeInstruction(options.conversionMode);
   const textModeInstruction = options.outputMode === "text"
     ? "وضع TXT: لا تستخرج أو تضف أي تنسيق بصري مثل bold أو italic أو underline أو font_size أو bbox."
-    : "وضع Word: يمكن استخدام runs للحفاظ على الغامق والمائل والتسطير فقط عندما تكون ظاهرة بوضوح في الأصل. اجعل التسطير على نفس الكلمة أو العبارة فقط.";
+    : "وضع Word: يمكن استخدام runs للحفاظ على الغامق والمائل والتسطير وحجم الخط عندما تكون ظاهرة بوضوح في الأصل. اجعل التسطير على نفس الكلمة أو العبارة فقط. استخدم role للعناوين والقوائم والمحاذاة الواضحة فقط.";
   const imageInstruction = options.includeImageDescriptions
     ? "إذا وجدت صورة أو رسمًا مهمًا، أضف وصفًا موجزًا له في image_descriptions."
     : "لا تضف أوصاف صور ولا تكتب عبارات بديلة مثل صورة مدمجة أو صورة من الصفحة.";
@@ -56,7 +106,7 @@ ${imageInstruction}
 {
   "page_number": ${pageNumber},
   "text_blocks": [
-    { "text": "نص فقرة أو عنوان", "runs": [{ "text": "جزء من النص", "bold": false, "italic": false, "underline": false }] }
+    { "text": "نص فقرة أو عنوان", "role": "paragraph", "level": 0, "alignment": "right", "font_size": 14, "runs": [{ "text": "جزء من النص", "bold": false, "italic": false, "underline": false, "font_size": 14 }] }
   ],
   "tables": [{ "rows": [["خلية", "خلية"]] }],
   "image_descriptions": ["وصف اختياري"]
@@ -83,13 +133,52 @@ function parseGeminiJson(rawText: string, pageNumber: number): GeminiPageResult 
   const end = text.lastIndexOf("}");
 
   if (start < 0 || end <= start) {
-    throw new Error("تعذر العثور على JSON في رد Gemini.");
+    return resultFromPlainText(text, pageNumber, "لم يرجع Gemini JSON واضحًا؛ تم إنقاذ النص الخام.");
   }
 
   const jsonText = text.slice(start, end + 1);
-  const parsed = JSON.parse(jsonText) as GeminiPageResult;
+  let parsed: GeminiPageResult;
+  try {
+    parsed = parseJsonWithRepair(jsonText) as GeminiPageResult;
+  } catch {
+    return resultFromPlainText(text, pageNumber, "فشل JSON حتى بعد محاولة الإصلاح؛ تم إنقاذ النص الخام.");
+  }
 
   return normalizeGeminiResult(parsed, pageNumber);
+}
+
+function parseJsonWithRepair(jsonText: string): unknown {
+  const candidates = [
+    jsonText,
+    jsonText.replace(/,\s*([}\]])/g, "$1"),
+    balanceJson(jsonText.replace(/,\s*([}\]])/g, "$1"))
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error("تعذر تحليل JSON بعد محاولة الإصلاح.");
+}
+
+function balanceJson(value: string): string {
+  let text = value;
+  const openBraces = (text.match(/{/g) ?? []).length;
+  const closeBraces = (text.match(/}/g) ?? []).length;
+  const openBrackets = (text.match(/\[/g) ?? []).length;
+  const closeBrackets = (text.match(/]/g) ?? []).length;
+
+  if ((text.match(/"/g) ?? []).length % 2 === 1) {
+    text += '"';
+  }
+
+  text += "]".repeat(Math.max(0, openBrackets - closeBrackets));
+  text += "}".repeat(Math.max(0, openBraces - closeBraces));
+  return text;
 }
 
 function stripCodeFence(value: string): string {
@@ -118,6 +207,17 @@ function normalizeText(value: unknown): string {
     .trim();
 }
 
+export function resultFromPlainText(text: string, pageNumber: number, warning: string): GeminiPageResult {
+  const cleaned = normalizeText(stripCodeFence(text));
+  return {
+    page_number: pageNumber,
+    text_blocks: cleaned ? [{ text: cleaned }] : [],
+    tables: [],
+    image_descriptions: [],
+    warnings: [warning]
+  };
+}
+
 function normalizeGeminiResult(value: GeminiPageResult, pageNumber: number): GeminiPageResult {
   const textBlocks = Array.isArray(value.text_blocks) ? value.text_blocks : [];
   const tables = Array.isArray(value.tables) ? value.tables : [];
@@ -133,9 +233,14 @@ function normalizeGeminiResult(value: GeminiPageResult, pageNumber: number): Gem
               text: normalizeText(run?.text),
               bold: Boolean(run?.bold),
               italic: Boolean(run?.italic),
-              underline: Boolean(run?.underline)
+              underline: Boolean(run?.underline),
+              font_size: normalizeFontSize(run?.font_size)
             })).filter((run) => run.text.length > 0)
-          : undefined
+          : undefined,
+        role: normalizeRole(block?.role),
+        level: normalizeLevel(block?.level),
+        alignment: normalizeAlignment(block?.alignment),
+        font_size: normalizeFontSize(block?.font_size)
       }))
       .filter((block) => block.text.length > 0 || (block.runs?.length ?? 0) > 0),
     tables: tables
@@ -148,4 +253,22 @@ function normalizeGeminiResult(value: GeminiPageResult, pageNumber: number): Gem
     image_descriptions: imageDescriptions.map(normalizeText).filter(Boolean),
     warnings: Array.isArray(value.warnings) ? value.warnings.map(normalizeText).filter(Boolean) : []
   };
+}
+
+function normalizeRole(value: unknown): "heading" | "paragraph" | "list_item" | undefined {
+  return value === "heading" || value === "paragraph" || value === "list_item" ? value : undefined;
+}
+
+function normalizeAlignment(value: unknown): "right" | "center" | "left" | undefined {
+  return value === "right" || value === "center" || value === "left" ? value : undefined;
+}
+
+function normalizeLevel(value: unknown): number | undefined {
+  const level = Number(value);
+  return Number.isFinite(level) ? Math.min(Math.max(Math.round(level), 0), 6) : undefined;
+}
+
+function normalizeFontSize(value: unknown): number | undefined {
+  const fontSize = Number(value);
+  return Number.isFinite(fontSize) ? Math.min(Math.max(Math.round(fontSize), 8), 36) : undefined;
 }

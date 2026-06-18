@@ -16,7 +16,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -45,8 +46,28 @@ button.secondary {
   color: #23180e;
 }
 
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0.75rem 1.2rem;
+  background: #0b7285;
+  color: #fff;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.button-link:hover,
+.button-link:focus-visible {
+  background: #095c6a;
+  outline: 4px solid #5a2f12;
+  outline-offset: 3px;
+}
+
 input,
-select {
+select,
+textarea {
   width: 100%;
   border: 2px solid #bda98a;
   border-radius: 0.9rem;
@@ -55,8 +76,30 @@ select {
   color: #1f1a14;
 }
 
+textarea {
+  min-height: 7rem;
+  resize: vertical;
+  direction: ltr;
+  text-align: left;
+}
+
+.preview-box {
+  direction: rtl;
+  text-align: right;
+  line-height: 1.8;
+}
+
+.search-row {
+  align-items: end;
+}
+
+.search-label {
+  min-width: 10rem;
+}
+
 input:focus,
 select:focus,
+textarea:focus,
 button:focus-visible {
   outline: 4px solid #0b7285;
   outline-offset: 3px;
@@ -152,6 +195,17 @@ label {
   color: #5d5145;
 }
 
+.history-item {
+  border-top: 1px solid #d8c7aa;
+  padding-top: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.history-item p {
+  margin: 0.35rem 0 0.75rem;
+  line-height: 1.7;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -211,6 +265,10 @@ th {
   }
 
   button {
+    width: 100%;
+  }
+
+  .button-link {
     width: 100%;
   }
 }

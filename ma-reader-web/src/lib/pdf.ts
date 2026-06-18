@@ -4,8 +4,8 @@ import type { SourcePage } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-const MAX_PAGE_SIDE = 1800;
-const JPEG_QUALITY = 0.86;
+const MAX_PAGE_SIDE = 3072;
+const JPEG_QUALITY = 0.9;
 
 export async function filesToSourcePages(files: File[]): Promise<SourcePage[]> {
   const pages: SourcePage[] = [];
@@ -51,12 +51,26 @@ async function pdfToPages(file: File): Promise<SourcePage[]> {
       pageNumber: pageIndex,
       imageDataUrl: canvas.toDataURL("image/jpeg", JPEG_QUALITY),
       width: canvas.width,
-      height: canvas.height
+      height: canvas.height,
+      localText: await extractPageText(page)
     });
   }
 
   await pdfDocument.destroy();
   return pages;
+}
+
+async function extractPageText(page: pdfjsLib.PDFPageProxy): Promise<string> {
+  try {
+    const content = await page.getTextContent();
+    return content.items
+      .map((item) => "str" in item ? item.str : "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  } catch {
+    return "";
+  }
 }
 
 async function imageFileToPage(file: File, pageNumber: number): Promise<SourcePage> {

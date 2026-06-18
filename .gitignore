@@ -1,0 +1,7 @@
+ma-reader-web/node_modules/
+ma-reader-web/dist/
+ma-reader-web/.netlify/
+ma-reader-web/.env
+ma-reader-web/.env.*
+ma-reader-web/*.log
+ma-reader-web/npm-debug.log*

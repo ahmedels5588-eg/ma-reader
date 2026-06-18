@@ -6,7 +6,9 @@ const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models
 interface GeminiRequestBody {
   apiKey?: string;
   imageDataUrl?: string;
+  imageDataUrls?: string[];
   prompt?: string;
+  responseMimeType?: "application/json" | "text/plain";
 }
 
 export const handler: Handler = async (event) => {
@@ -22,15 +24,16 @@ export const handler: Handler = async (event) => {
   }
 
   const apiKey = body.apiKey?.trim();
-  const imageDataUrl = body.imageDataUrl || "";
   const prompt = body.prompt || "";
+  const responseMimeType = body.responseMimeType || "application/json";
+  const imageDataUrls = [body.imageDataUrl, ...(body.imageDataUrls ?? [])].filter(Boolean) as string[];
 
-  if (!apiKey || !imageDataUrl || !prompt) {
-    return json(400, { error: "Missing apiKey, imageDataUrl, or prompt" });
+  if (!apiKey || !prompt) {
+    return json(400, { error: "Missing apiKey or prompt" });
   }
 
-  const image = parseDataUrl(imageDataUrl);
-  if (!image) {
+  const images = imageDataUrls.map(parseDataUrl);
+  if (images.some((image) => !image)) {
     return json(400, { error: "Invalid image data" });
   }
 
@@ -44,12 +47,12 @@ export const handler: Handler = async (event) => {
             role: "user",
             parts: [
               { text: prompt },
-              {
+              ...images.map((image) => ({
                 inline_data: {
-                  mime_type: image.mimeType,
-                  data: image.base64
+                  mime_type: image!.mimeType,
+                  data: image!.base64
                 }
-              }
+              }))
             ]
           }
         ],
@@ -57,7 +60,7 @@ export const handler: Handler = async (event) => {
           temperature: 0.1,
           topP: 0.95,
           maxOutputTokens: 8192,
-          responseMimeType: "application/json"
+          responseMimeType
         }
       })
     });
