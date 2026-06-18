@@ -28,6 +28,8 @@ export default function App() {
   const [message, setMessage] = useState("جاهز.");
   const [assertiveMessage, setAssertiveMessage] = useState("");
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [lastSearchIndex, setLastSearchIndex] = useState(-1);
   const [askQuestion, setAskQuestion] = useState("");
@@ -40,6 +42,7 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement | null>(null);
   const askRef = useRef<HTMLTextAreaElement | null>(null);
   const previewRef = useRef<HTMLTextAreaElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     const storedApiKeys = loadApiKeys();
@@ -102,6 +105,17 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   });
 
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.srcObject = cameraStream;
+      if (cameraStream) {
+        void videoRef.current.play().catch(() => setCameraError("تعذر تشغيل معاينة الكاميرا."));
+      }
+    }
+  }, [cameraStream]);
+
+  useEffect(() => () => stopCameraStream(cameraStream), [cameraStream]);
+
   const doneCount = results.filter((result) => result.status === "done").length;
   const failedCount = results.filter((result) => result.status === "failed").length;
   const progressText = summarizeProgress(doneCount, failedCount, results.length || pages.length);
@@ -127,9 +141,9 @@ export default function App() {
     }
 
     try {
-      await testApiKey(key);
+      const testResult = await testApiKey(key);
       persistApiKeys([...apiKeys, key], apiKeys.length);
-      setMessage(`تم اختبار المفتاح وقبوله. عدد المفاتيح المحفوظة الآن: ${apiKeys.length + 1}.`);
+      setMessage(`${testResult.message} عدد المفاتيح المحفوظة الآن: ${apiKeys.length + 1}.`);
     } catch (error) {
       rejectApiKey(error);
     }
@@ -153,22 +167,32 @@ export default function App() {
     }
 
     try {
-      await testApiKey(key);
+      const testResult = await testApiKey(key);
       const nextKeys = [...apiKeys];
       nextKeys[safeActiveKeyIndex] = key;
       persistApiKeys(nextKeys, safeActiveKeyIndex);
-      setMessage(`تم اختبار المفتاح وقبوله واستبدال المفتاح رقم ${safeActiveKeyIndex + 1}.`);
+      setMessage(`${testResult.message} تم استبدال المفتاح رقم ${safeActiveKeyIndex + 1}.`);
     } catch (error) {
       rejectApiKey(error);
     }
   }
 
-  async function testApiKey(key: string) {
+  async function testApiKey(key: string): Promise<{ accepted: true; message: string }> {
     setTestingKey(true);
     setApiKeyTestStatus("جاري اختبار المفتاح مع Gemini...");
     try {
       await askGemini(key, "اختبار مفتاح API. أجب بكلمة OK فقط.");
-      setApiKeyTestStatus("تم التأكد من أن مفتاح API صحيح وتم قبوله.");
+      const message = "تم التأكد من أن مفتاح API صحيح وتم قبوله.";
+      setApiKeyTestStatus(message);
+      return { accepted: true, message };
+    } catch (error) {
+      if (isGoogleRestrictionPreviewWarning(error)) {
+        const message = "وصل تحذير مؤقت من Google بخصوص قيود المفتاح، لكن المفتاح لا يظهر كمفتاح خاطئ وتم قبوله مع التحذير.";
+        setApiKeyTestStatus(message);
+        return { accepted: true, message };
+      }
+
+      throw error;
     } finally {
       setTestingKey(false);
     }
@@ -222,16 +246,87 @@ export default function App() {
 
     try {
       const extractedPages = await filesToSourcePages(Array.from(fileList));
-      setPages(extractedPages);
-      setResults(extractedPages.map((page) => ({ page, status: "pending" })));
-      setPageFrom(1);
-      setPageTo(Math.max(1, extractedPages.length));
-      setMessage(`تم تجهيز ${extractedPages.length} صفحة. لم يتم رفع ملف PDF كامل إلى الخادم.`);
+      appendSourcePages(extractedPages);
+      setMessage(`تمت إضافة ${extractedPages.length} صفحة. لم يتم رفع ملف PDF كامل إلى الخادم.`);
     } catch (error) {
       setAssertiveMessage(error instanceof Error ? error.message : "فشل تجهيز الملفات.");
     } finally {
       setLoadingFiles(false);
     }
+  }
+
+  function appendSourcePages(newPages: SourcePage[]) {
+    if (newPages.length === 0) {
+      return;
+    }
+
+    const combinedPages = [...pages, ...newPages].map((page, index) => ({ ...page, pageNumber: index + 1 }));
+    const previousResults = new Map(results.map((result) => [result.page.id, result]));
+    setPages(combinedPages);
+    setResults(combinedPages.map((page) => {
+      const previous = previousResults.get(page.id);
+      return previous ? { ...previous, page } : { page, status: "pending" };
+    }));
+    if (pages.length === 0) {
+      setPageFrom(1);
+    }
+    setPageTo(Math.max(1, combinedPages.length));
+  }
+
+  async function openCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError("الكاميرا غير مدعومة في هذا المتصفح.");
+      return;
+    }
+
+    try {
+      setCameraError("");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false
+      });
+      stopCameraStream(cameraStream);
+      setCameraStream(stream);
+      setMessage("تم فتح الكاميرا. وجّه الصفحة ثم اضغط التقاط صورة.");
+    } catch (error) {
+      setCameraError(error instanceof Error ? error.message : "تعذر فتح الكاميرا.");
+    }
+  }
+
+  function closeCamera() {
+    stopCameraStream(cameraStream);
+    setCameraStream(null);
+    setCameraError("");
+    setMessage("تم إغلاق الكاميرا.");
+  }
+
+  function captureCameraPage() {
+    const video = videoRef.current;
+    if (!video || !cameraStream) {
+      setCameraError("افتح الكاميرا أولًا قبل التقاط صورة.");
+      return;
+    }
+
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) {
+      setCameraError("انتظر حتى تظهر معاينة الكاميرا ثم حاول الالتقاط مرة أخرى.");
+      return;
+    }
+
+    const canvas = window.document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      setCameraError("تعذر تجهيز صورة الكاميرا.");
+      return;
+    }
+
+    context.drawImage(video, 0, 0, width, height);
+    const pageNumber = pages.length + 1;
+    appendSourcePages([{ id: `camera-${Date.now()}`, sourceName: "صورة من الكاميرا", pageNumber, imageDataUrl: canvas.toDataURL("image/jpeg", 0.92), width, height }]);
+    setMessage(`تم التقاط صورة من الكاميرا وإضافتها كصفحة رقم ${pageNumber}. يمكنك إضافة ملفات معها.`);
   }
 
   async function startConversion(onlyFailed: boolean) {
@@ -577,6 +672,20 @@ export default function App() {
           onChange={(event) => void handleFilesSelected(event.target.files)}
         />
 
+        <div className="camera-panel" aria-labelledby="camera-title">
+          <h3 id="camera-title">التقاط صورة بالكاميرا</h3>
+          <div className="button-row">
+            <button type="button" className="secondary" onClick={() => void openCamera()} disabled={busy || loadingFiles || Boolean(cameraStream)}>فتح الكاميرا</button>
+            <button type="button" onClick={captureCameraPage} disabled={busy || !cameraStream}>التقاط صورة وإضافتها</button>
+            <button type="button" className="secondary" onClick={closeCamera} disabled={!cameraStream}>إغلاق الكاميرا</button>
+          </div>
+          {cameraStream && (
+            <video ref={videoRef} className="camera-preview" playsInline muted aria-label="معاينة الكاميرا قبل التقاط الصورة" />
+          )}
+          {cameraError && <p className="hint" role="alert">{cameraError}</p>}
+          <p className="hint">يمكن التقاط صورة من الكاميرا وإضافة PDF أو صور معها في نفس التحويل.</p>
+        </div>
+
         <div className="settings-grid">
           <label>
             من صفحة
@@ -822,6 +931,15 @@ function rotateKeys(keys: string[], startIndex: number): string[] {
 function isQuotaOrKeyError(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   return /quota|rate|limit|permission|api key|apikey|unauth|forbidden|exceeded|billing/.test(message);
+}
+
+function isGoogleRestrictionPreviewWarning(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return message.includes("temporary service disruptions") && message.includes("unrestricted keys");
+}
+
+function stopCameraStream(stream: MediaStream | null) {
+  stream?.getTracks().forEach((track) => track.stop());
 }
 
 function fallbackFromLocalText(page: SourcePage, error: unknown) {
