@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { summarizeProgress } from "./lib/accessibility";
-import { splitTextForTts, synthesizeSpeech, ttsSegmentsToWavBlob, type TtsAudioSegment } from "./lib/audiobook";
+import { splitTextForTts, synthesizeSpeech, testGoogleCloudTts, ttsSegmentsToWavBlob, type TtsAudioSegment, type TtsProvider } from "./lib/audiobook";
 import { buildDocx, buildErrorReport, buildPlainText, downloadBlob } from "./lib/docxBuilder";
 import { askGemini, convertPageWithGemini, rescuePageTextWithGemini, resultFromPlainText } from "./lib/gemini";
 import { filesToSourcePages } from "./lib/pdf";
@@ -42,6 +42,7 @@ export default function App() {
   const [audiobookMessage, setAudiobookMessage] = useState("لم يتم إنشاء كتاب صوتي بعد.");
   const [audiobookBlob, setAudiobookBlob] = useState<Blob | null>(null);
   const [audiobookProgress, setAudiobookProgress] = useState(0);
+  const [ttsProvider, setTtsProvider] = useState<TtsProvider>("google");
   const stopRequested = useRef(false);
   const abortController = useRef<AbortController | null>(null);
   const audiobookAbortController = useRef<AbortController | null>(null);
@@ -203,18 +204,19 @@ export default function App() {
     setTestingKey(true);
     setApiKeyTestStatus("جاري اختبار المفتاح مع Gemini...");
     try {
-      await askGemini(key, "اختبار مفتاح API. أجب بكلمة OK فقط.");
-      const message = "تم التأكد من أن مفتاح API صحيح وتم قبوله.";
-      setApiKeyTestStatus(message);
-      return { accepted: true, message };
-    } catch (error) {
-      if (isGoogleRestrictionPreviewWarning(error)) {
-        const message = "وصل تحذير مؤقت من Google بخصوص قيود المفتاح، لكن المفتاح لا يظهر كمفتاح خاطئ وتم قبوله مع التحذير.";
-        setApiKeyTestStatus(message);
-        return { accepted: true, message };
+      try {
+        await askGemini(key, "اختبار مفتاح API. أجب بكلمة OK فقط.");
+      } catch (error) {
+        if (!isGoogleRestrictionPreviewWarning(error)) {
+          throw error;
+        }
       }
 
-      throw error;
+      setApiKeyTestStatus("نجح اختبار Gemini. جاري اختبار Google Cloud TTS...");
+      await testGoogleCloudTts(key);
+      const message = "تم اختبار المفتاح بنجاح مع Gemini وGoogle Cloud TTS وتم قبوله.";
+      setApiKeyTestStatus(message);
+      return { accepted: true, message };
     } finally {
       setTestingKey(false);
     }
@@ -594,7 +596,7 @@ export default function App() {
       try {
         const realIndex = apiKeys.indexOf(key);
         setActiveKeyIndex(realIndex >= 0 ? realIndex : 0);
-        return await synthesizeSpeech(key, text, signal);
+        return await synthesizeSpeech(key, text, ttsProvider, signal);
       } catch (error) {
         lastError = error;
         if (!isQuotaOrKeyError(error)) {
@@ -917,7 +919,14 @@ export default function App() {
 
       <section className="card" aria-labelledby="audiobook-title">
         <h2 id="audiobook-title">4. الكتاب الصوتي</h2>
-        <p className="hint">ينشئ ملف WAV واحدًا من الصفحات المحولة باستخدام Gemini TTS. لا يتم تخزين الصوت على الخادم.</p>
+        <p className="hint">ينشئ ملف WAV واحدًا من الصفحات المحولة. Google Cloud TTS هو الاختيار الموصى به، وGemini TTS متاح كبديل تجريبي. لا يتم تخزين الصوت على الخادم.</p>
+        <label>
+          مزود الصوت
+          <select value={ttsProvider} onChange={(event) => setTtsProvider(event.target.value as TtsProvider)} disabled={audiobookBusy}>
+            <option value="google">Google Cloud TTS - موصى به</option>
+            <option value="gemini">Gemini TTS - تجريبي</option>
+          </select>
+        </label>
         <div className="button-row">
           <button type="button" onClick={() => void handleCreateAudiobook()} disabled={!hasSuccessfulPages || audiobookBusy || apiKeys.length === 0}>إنشاء كتاب صوتي</button>
           <button type="button" className="secondary" onClick={stopAudiobookCreation} disabled={!audiobookBusy}>إيقاف إنشاء الصوت</button>

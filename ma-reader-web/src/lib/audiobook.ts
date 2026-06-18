@@ -3,15 +3,19 @@ export interface TtsAudioSegment {
   mimeType: string;
 }
 
+export type TtsProvider = "google" | "gemini";
+
 export async function synthesizeSpeech(
   apiKey: string,
   text: string,
+  provider: TtsProvider,
   signal?: AbortSignal
 ): Promise<TtsAudioSegment> {
-  const response = await fetch("/.netlify/functions/tts", {
+  const endpoint = provider === "google" ? "/.netlify/functions/google-tts" : "/.netlify/functions/tts";
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey, text, voiceName: "Kore" }),
+    body: JSON.stringify({ apiKey, text, voiceName: provider === "google" ? "ar-XA-Standard-A" : "Kore" }),
     signal
   });
 
@@ -21,10 +25,14 @@ export async function synthesizeSpeech(
   }
 
   if (!payload?.audioBase64 || !payload.mimeType) {
-    throw new Error("لم يرجع Gemini TTS صوتًا صالحًا.");
+    throw new Error("لم يرجع مزود الصوت نتيجة صالحة.");
   }
 
   return { audioBase64: payload.audioBase64, mimeType: payload.mimeType };
+}
+
+export async function testGoogleCloudTts(apiKey: string, signal?: AbortSignal): Promise<void> {
+  await synthesizeSpeech(apiKey, "اختبار", "google", signal);
 }
 
 export function splitTextForTts(text: string, maxLength = 1800): string[] {
@@ -63,7 +71,7 @@ export function ttsSegmentsToWavBlob(segments: TtsAudioSegment[]): Blob {
   }
 
   const sampleRate = parseSampleRate(segments[0].mimeType);
-  const pcmParts = segments.map((segment) => base64ToUint8Array(segment.audioBase64));
+  const pcmParts = segments.map((segment) => stripWavHeaderIfPresent(base64ToUint8Array(segment.audioBase64)));
   const totalLength = pcmParts.reduce((sum, part) => sum + part.length, 0);
   const pcm = new Uint8Array(totalLength);
   let offset = 0;
@@ -88,6 +96,33 @@ function base64ToUint8Array(base64: string): Uint8Array {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
+}
+
+function stripWavHeaderIfPresent(bytes: Uint8Array): Uint8Array {
+  if (bytes.length < 44 || ascii(bytes, 0, 4) !== "RIFF" || ascii(bytes, 8, 4) !== "WAVE") {
+    return bytes;
+  }
+
+  let offset = 12;
+  while (offset + 8 <= bytes.length) {
+    const chunkId = ascii(bytes, offset, 4);
+    const chunkSize = bytes[offset + 4] | (bytes[offset + 5] << 8) | (bytes[offset + 6] << 16) | (bytes[offset + 7] << 24);
+    const dataStart = offset + 8;
+    if (chunkId === "data") {
+      return bytes.slice(dataStart, dataStart + chunkSize);
+    }
+    offset = dataStart + chunkSize;
+  }
+
+  return bytes;
+}
+
+function ascii(bytes: Uint8Array, offset: number, length: number): string {
+  let value = "";
+  for (let index = 0; index < length; index += 1) {
+    value += String.fromCharCode(bytes[offset + index]);
+  }
+  return value;
 }
 
 function wavHeader(dataLength: number, sampleRate: number): ArrayBuffer {
