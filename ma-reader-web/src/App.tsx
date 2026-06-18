@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { summarizeProgress } from "./lib/accessibility";
+import { splitTextForTts, synthesizeSpeech, ttsSegmentsToWavBlob, type TtsAudioSegment } from "./lib/audiobook";
 import { buildDocx, buildErrorReport, buildPlainText, downloadBlob } from "./lib/docxBuilder";
 import { askGemini, convertPageWithGemini, rescuePageTextWithGemini, resultFromPlainText } from "./lib/gemini";
 import { filesToSourcePages } from "./lib/pdf";
@@ -32,12 +33,18 @@ export default function App() {
   const [cameraError, setCameraError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [lastSearchIndex, setLastSearchIndex] = useState(-1);
+  const [previewPageNumber, setPreviewPageNumber] = useState(1);
   const [askQuestion, setAskQuestion] = useState("");
   const [askAnswer, setAskAnswer] = useState("");
   const [askHistory, setAskHistory] = useState<Array<{ question: string; answer: string }>>([]);
   const [askBusy, setAskBusy] = useState(false);
+  const [audiobookBusy, setAudiobookBusy] = useState(false);
+  const [audiobookMessage, setAudiobookMessage] = useState("لم يتم إنشاء كتاب صوتي بعد.");
+  const [audiobookBlob, setAudiobookBlob] = useState<Blob | null>(null);
+  const [audiobookProgress, setAudiobookProgress] = useState(0);
   const stopRequested = useRef(false);
   const abortController = useRef<AbortController | null>(null);
+  const audiobookAbortController = useRef<AbortController | null>(null);
   const apiKeysRef = useRef<HTMLInputElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const askRef = useRef<HTMLTextAreaElement | null>(null);
@@ -116,6 +123,17 @@ export default function App() {
 
   useEffect(() => () => stopCameraStream(cameraStream), [cameraStream]);
 
+  useEffect(() => {
+    const firstDonePage = results.find((result) => result.status === "done")?.page.pageNumber;
+    if (firstDonePage && !results.some((result) => result.status === "done" && result.page.pageNumber === previewPageNumber)) {
+      setPreviewPageNumber(firstDonePage);
+    }
+  }, [results, previewPageNumber]);
+
+  useEffect(() => {
+    setLastSearchIndex(-1);
+  }, [previewPageNumber, searchTerm]);
+
   const doneCount = results.filter((result) => result.status === "done").length;
   const failedCount = results.filter((result) => result.status === "failed").length;
   const progressText = summarizeProgress(doneCount, failedCount, results.length || pages.length);
@@ -125,7 +143,11 @@ export default function App() {
   const safePageTo = clampPage(pageTo, pages.length);
   const selectedRangeStart = Math.min(safePageFrom, safePageTo);
   const selectedRangeEnd = Math.max(safePageFrom, safePageTo);
-  const previewText = buildPreviewText(results);
+  const fullPreviewText = buildPreviewText(results);
+  const successfulPreviewResults = results.filter((result) => result.status === "done" && result.data);
+  const currentPreviewResult = successfulPreviewResults.find((result) => result.page.pageNumber === previewPageNumber) ?? successfulPreviewResults[0];
+  const currentPreviewText = currentPreviewResult ? buildSinglePreviewText(currentPreviewResult) : "";
+  const audiobookText = buildAudiobookText(results);
   const safeActiveKeyIndex = apiKeys.length > 0 ? Math.min(activeKeyIndex, apiKeys.length - 1) : 0;
 
   async function handleAddApiKey() {
@@ -271,6 +293,31 @@ export default function App() {
       setPageFrom(1);
     }
     setPageTo(Math.max(1, combinedPages.length));
+  }
+
+  function deleteSourcePage(pageId: string) {
+    if (busy || loadingFiles) {
+      setAssertiveMessage("لا يمكن حذف صفحة أثناء التجهيز أو التحويل.");
+      return;
+    }
+
+    const keptPages = pages.filter((page) => page.id !== pageId).map((page, index) => ({ ...page, pageNumber: index + 1 }));
+    const keptIds = new Set(keptPages.map((page) => page.id));
+    const renumberedResults = results
+      .filter((result) => keptIds.has(result.page.id))
+      .map((result) => {
+        const page = keptPages.find((candidate) => candidate.id === result.page.id)!;
+        return { ...result, page };
+      });
+
+    setPages(keptPages);
+    setResults(renumberedResults);
+    setPageFrom(keptPages.length > 0 ? Math.min(pageFrom, keptPages.length) : 1);
+    setPageTo(keptPages.length > 0 ? Math.min(pageTo, keptPages.length) : 1);
+
+    const nextPreviewPage = renumberedResults.find((result) => result.status === "done")?.page.pageNumber ?? 1;
+    setPreviewPageNumber(nextPreviewPage);
+    setMessage(keptPages.length > 0 ? "تم حذف الصفحة وإعادة ترقيم الصفحات." : "تم حذف كل الصفحات المختارة.");
   }
 
   async function openCamera() {
@@ -482,15 +529,100 @@ export default function App() {
     downloadBlob(buildErrorReport(results), "ma-reader-errors.txt");
   }
 
+  async function handleCreateAudiobook() {
+    if (apiKeys.length === 0) {
+      setAssertiveMessage("أدخل مفتاح Gemini API قبل إنشاء الكتاب الصوتي.");
+      return;
+    }
+
+    if (!audiobookText.trim()) {
+      setAssertiveMessage("لا توجد صفحات محولة لإنشاء كتاب صوتي.");
+      return;
+    }
+
+    const chunks = splitTextForTts(audiobookText);
+    if (chunks.length === 0) {
+      setAssertiveMessage("النص المحول فارغ ولا يمكن تحويله إلى صوت.");
+      return;
+    }
+
+    setAudiobookBusy(true);
+    setAudiobookBlob(null);
+    setAudiobookProgress(0);
+    setAudiobookMessage(`بدأ إنشاء الكتاب الصوتي. عدد المقاطع: ${chunks.length}.`);
+    audiobookAbortController.current = new AbortController();
+    const segments: TtsAudioSegment[] = [];
+
+    try {
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (audiobookAbortController.current.signal.aborted) {
+          throw new Error("تم إيقاف إنشاء الكتاب الصوتي.");
+        }
+
+        setAudiobookMessage(`جاري إنشاء المقطع الصوتي ${index + 1} من ${chunks.length}...`);
+        segments.push(await synthesizeSpeechWithKeys(chunks[index], audiobookAbortController.current.signal));
+        setAudiobookProgress(Math.round(((index + 1) / chunks.length) * 100));
+        if (index < chunks.length - 1) {
+          await delay(500);
+        }
+      }
+
+      const blob = ttsSegmentsToWavBlob(segments);
+      setAudiobookBlob(blob);
+      setAudiobookMessage("تم إنشاء الكتاب الصوتي بنجاح. يمكنك تنزيل ملف WAV الآن.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "فشل إنشاء الكتاب الصوتي.";
+      setAudiobookMessage(message);
+      setAssertiveMessage(message);
+    } finally {
+      audiobookAbortController.current = null;
+      setAudiobookBusy(false);
+    }
+  }
+
+  async function synthesizeSpeechWithKeys(text: string, signal?: AbortSignal): Promise<TtsAudioSegment> {
+    let lastError: unknown;
+    const orderedKeys = rotateKeys(apiKeys, activeKeyIndex);
+
+    for (const key of orderedKeys) {
+      try {
+        const realIndex = apiKeys.indexOf(key);
+        setActiveKeyIndex(realIndex >= 0 ? realIndex : 0);
+        return await synthesizeSpeech(key, text, signal);
+      } catch (error) {
+        lastError = error;
+        if (!isQuotaOrKeyError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("فشل إنشاء الصوت بكل المفاتيح.");
+  }
+
+  function stopAudiobookCreation() {
+    audiobookAbortController.current?.abort();
+    setAudiobookMessage("تم طلب إيقاف إنشاء الكتاب الصوتي.");
+  }
+
+  function handleDownloadAudiobook() {
+    if (!audiobookBlob) {
+      setAssertiveMessage("لا يوجد كتاب صوتي جاهز للتنزيل.");
+      return;
+    }
+
+    downloadBlob(audiobookBlob, "ma-reader-audiobook.wav");
+  }
+
   function findInPreview(direction: "next" | "previous") {
     const term = searchTerm.trim();
     const preview = previewRef.current;
-    if (!term || !previewText || !preview) {
+    if (!term || !currentPreviewText || !preview) {
       setAssertiveMessage("اكتب نصًا للبحث أولًا.");
       return;
     }
 
-    const haystack = previewText.toLocaleLowerCase("ar");
+    const haystack = currentPreviewText.toLocaleLowerCase("ar");
     const needle = term.toLocaleLowerCase("ar");
     let index = -1;
 
@@ -519,21 +651,33 @@ export default function App() {
 
   function goToPage(pageNumber: number) {
     const preview = previewRef.current;
-    if (!preview || !previewText) {
+    if (!preview || successfulPreviewResults.length === 0) {
       setAssertiveMessage("لا توجد نتائج للانتقال داخلها.");
       return;
     }
 
-    const marker = `=== الصفحة ${pageNumber} ===`;
-    const index = previewText.indexOf(marker);
-    if (index < 0) {
+    const exists = successfulPreviewResults.some((result) => result.page.pageNumber === pageNumber);
+    if (!exists) {
       setAssertiveMessage(`لم يتم العثور على الصفحة ${pageNumber} داخل النتائج الحالية.`);
       return;
     }
 
+    setPreviewPageNumber(pageNumber);
     preview.focus();
-    preview.setSelectionRange(index, index + marker.length);
     setMessage(`تم الانتقال إلى الصفحة ${pageNumber}.`);
+  }
+
+  function movePreviewPage(delta: number) {
+    if (successfulPreviewResults.length === 0) {
+      setAssertiveMessage("لا توجد صفحات محولة للمعاينة.");
+      return;
+    }
+
+    const currentIndex = successfulPreviewResults.findIndex((result) => result.page.pageNumber === (currentPreviewResult?.page.pageNumber ?? previewPageNumber));
+    const nextIndex = Math.min(Math.max(currentIndex + delta, 0), successfulPreviewResults.length - 1);
+    const nextPage = successfulPreviewResults[nextIndex].page.pageNumber;
+    setPreviewPageNumber(nextPage);
+    setMessage(`تم الانتقال في المعاينة إلى الصفحة ${nextPage}.`);
   }
 
   async function handleAskBook() {
@@ -574,7 +718,7 @@ export default function App() {
     try {
       const prompt = visual
         ? buildVisualAskPrompt(question, imagePages.map((page) => page.pageNumber))
-        : buildTextAskPrompt(question, previewText);
+        : buildTextAskPrompt(question, fullPreviewText);
       const answer = await askWithResilience(prompt, imagePages.map((page) => page.imageDataUrl));
       setAskAnswer(answer);
       setAskHistory((history) => [{ question, answer }, ...history].slice(0, 10));
@@ -686,6 +830,31 @@ export default function App() {
           <p className="hint">يمكن التقاط صورة من الكاميرا وإضافة PDF أو صور معها في نفس التحويل.</p>
         </div>
 
+        {pages.length > 0 && (
+          <div className="table-wrap" aria-labelledby="selected-pages-title">
+            <h3 id="selected-pages-title">الصفحات المختارة</h3>
+            <table>
+              <caption>يمكن حذف أي صفحة قبل أو بعد التحويل</caption>
+              <thead>
+                <tr>
+                  <th scope="col">الصفحة</th>
+                  <th scope="col">المصدر</th>
+                  <th scope="col">الإجراء</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pages.map((page) => (
+                  <tr key={page.id}>
+                    <td>{page.pageNumber}</td>
+                    <td>{page.sourceName}</td>
+                    <td><button type="button" className="secondary small-button" onClick={() => deleteSourcePage(page.id)} disabled={busy || loadingFiles}>حذف</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         <div className="settings-grid">
           <label>
             من صفحة
@@ -753,10 +922,40 @@ export default function App() {
         </div>
       </section>
 
+      <section className="card" aria-labelledby="audiobook-title">
+        <h2 id="audiobook-title">4. الكتاب الصوتي</h2>
+        <p className="hint">ينشئ ملف WAV واحدًا من الصفحات المحولة باستخدام Gemini TTS. لا يتم تخزين الصوت على الخادم.</p>
+        <div className="button-row">
+          <button type="button" onClick={() => void handleCreateAudiobook()} disabled={!hasSuccessfulPages || audiobookBusy || apiKeys.length === 0}>إنشاء كتاب صوتي</button>
+          <button type="button" className="secondary" onClick={stopAudiobookCreation} disabled={!audiobookBusy}>إيقاف إنشاء الصوت</button>
+          <button type="button" onClick={handleDownloadAudiobook} disabled={!audiobookBlob || audiobookBusy}>تنزيل الكتاب الصوتي WAV</button>
+        </div>
+        <progress value={audiobookProgress} max={100} aria-label="تقدم إنشاء الكتاب الصوتي" />
+        <p className="hint" aria-live="polite">{audiobookMessage}</p>
+      </section>
+
       <section className="card" aria-labelledby="preview-title">
         <h2 id="preview-title">معاينة النص والانتقال</h2>
         <div className="button-row search-row">
-          <label htmlFor="search-box" className="search-label">بحث داخل النتائج</label>
+          <label htmlFor="preview-page" className="search-label">صفحة المعاينة</label>
+          <select
+            id="preview-page"
+            value={currentPreviewResult?.page.pageNumber ?? ""}
+            onChange={(event) => setPreviewPageNumber(Number(event.target.value))}
+            disabled={successfulPreviewResults.length === 0}
+          >
+            {successfulPreviewResults.length === 0 ? (
+              <option value="">لا توجد صفحات محولة</option>
+            ) : successfulPreviewResults.map((result) => (
+              <option value={result.page.pageNumber} key={result.page.id}>الصفحة {result.page.pageNumber}</option>
+            ))}
+          </select>
+          <button type="button" className="secondary" onClick={() => movePreviewPage(-1)} disabled={successfulPreviewResults.length === 0}>الصفحة السابقة</button>
+          <button type="button" className="secondary" onClick={() => movePreviewPage(1)} disabled={successfulPreviewResults.length === 0}>الصفحة التالية</button>
+          <button type="button" className="secondary" onClick={() => currentPreviewResult && deleteSourcePage(currentPreviewResult.page.id)} disabled={!currentPreviewResult || busy}>حذف صفحة المعاينة</button>
+        </div>
+        <div className="button-row search-row">
+          <label htmlFor="search-box" className="search-label">بحث داخل الصفحة الحالية</label>
           <input
             id="search-box"
             ref={searchRef}
@@ -772,12 +971,12 @@ export default function App() {
         <textarea
           ref={previewRef}
           className="preview-box"
-          value={previewText}
+          value={currentPreviewText}
           readOnly
           rows={12}
-          aria-label="معاينة النص المستخرج"
+          aria-label="معاينة نص الصفحة الحالية"
         />
-        <p className="hint">الاختصارات: Ctrl+K للمفاتيح، Ctrl+F للبحث، F3 للتالي، Shift+F3 للسابق، Ctrl+G للانتقال إلى صفحة.</p>
+        <p className="hint">المعاينة تعرض صفحة واحدة لتسهيل الحركة. الاختصارات: Ctrl+K للمفاتيح، Ctrl+F للبحث، F3 للتالي، Shift+F3 للسابق، Ctrl+G للانتقال إلى صفحة.</p>
       </section>
 
       <section className="card" aria-labelledby="results-title">
@@ -794,6 +993,7 @@ export default function App() {
                   <th scope="col">المصدر</th>
                   <th scope="col">الحالة</th>
                   <th scope="col">تفاصيل</th>
+                  <th scope="col">الإجراء</th>
                 </tr>
               </thead>
               <tbody>
@@ -803,6 +1003,7 @@ export default function App() {
                     <td>{result.page.sourceName}</td>
                     <td>{statusLabel(result.status)}</td>
                     <td>{result.error || result.data?.warnings?.join("؛ ") || "-"}</td>
+                    <td><button type="button" className="secondary small-button" onClick={() => deleteSourcePage(result.page.id)} disabled={busy || loadingFiles}>حذف</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -849,16 +1050,42 @@ function buildPreviewText(results: PageResult[]): string {
   return results
     .filter((result) => result.status === "done" && result.data)
     .map((result) => {
-      const data = result.data!;
-      const lines = [`=== الصفحة ${result.page.pageNumber} ===`];
-      lines.push(...data.text_blocks.map((block) => block.text || block.runs?.map((run) => run.text).join("") || ""));
-      for (const table of data.tables ?? []) {
-        lines.push(...table.rows.map((row) => row.join("\t")));
-      }
-      lines.push(...(data.image_descriptions ?? []));
-      return lines.filter(Boolean).join("\n");
+      const pageText = pageResultToText(result);
+      return [`الصفحة ${result.page.pageNumber}`, pageText].filter(Boolean).join("\n");
     })
     .join("\n\n");
+}
+
+function buildSinglePreviewText(result: PageResult): string {
+  if (!result.data) {
+    return "";
+  }
+
+  return pageResultToText(result);
+}
+
+function buildAudiobookText(results: PageResult[]): string {
+  return results
+    .filter((result) => result.status === "done" && result.data)
+    .map((result) => {
+      const pageText = pageResultToText(result);
+      return [`الصفحة ${result.page.pageNumber}.`, pageText].filter(Boolean).join("\n");
+    })
+    .join("\n\n");
+}
+
+function pageResultToText(result: PageResult): string {
+  if (!result.data) {
+    return "";
+  }
+
+  const data = result.data;
+  const lines = data.text_blocks.map((block) => block.text || block.runs?.map((run) => run.text).join("") || "");
+  for (const table of data.tables ?? []) {
+    lines.push(...table.rows.map((row) => row.join("\t")));
+  }
+  lines.push(...(data.image_descriptions ?? []));
+  return lines.filter(Boolean).join("\n");
 }
 
 function isVisualQuestion(question: string): boolean {

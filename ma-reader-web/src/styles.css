@@ -46,6 +46,10 @@ button.secondary {
   color: #23180e;
 }
 
+.small-button {
+  padding: 0.45rem 0.85rem;
+}
+
 .button-link {
   display: inline-flex;
   align-items: center;
@@ -74,6 +78,12 @@ textarea {
   padding: 0.75rem;
   background: #fffaf2;
   color: #1f1a14;
+}
+
+progress {
+  width: 100%;
+  height: 1rem;
+  accent-color: #0b7285;
 }
 
 textarea {
@@ -229,6 +239,11 @@ label {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.table-wrap h3 {
+  margin: 0 0 0.75rem;
+  color: #5a2f12;
 }
 
 table {
